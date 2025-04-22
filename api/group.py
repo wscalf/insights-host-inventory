@@ -32,15 +32,17 @@ from app.models import HostGroupAssoc
 from app.models import InputGroupSchema
 from lib.feature_flags import FLAG_INVENTORY_KESSEL_WORKSPACE_MIGRATION
 from lib.feature_flags import get_flag_value
+from lib.group_repository import add_hosts_to_group
 from lib.group_repository import create_group_from_payload
 from lib.group_repository import delete_group_list
 from lib.group_repository import get_group_by_id_from_db
 from lib.group_repository import get_group_using_host_id
 from lib.group_repository import patch_group
 from lib.group_repository import remove_hosts_from_group
+from lib.group_repository import validate_add_host_list_to_group_for_group_create
+from lib.group_repository import wait_for_workspace_creation
 from lib.metrics import create_group_count
 from lib.middleware import delete_rbac_workspace
-from lib.middleware import get_rbac_default_workspace
 from lib.middleware import post_rbac_workspace
 from lib.middleware import put_rbac_workspace
 from lib.middleware import rbac
@@ -94,15 +96,35 @@ def create_group(body, rbac_filter=None):
     try:
         # Create group with validated data
         if get_flag_value(FLAG_INVENTORY_KESSEL_WORKSPACE_MIGRATION):
-            default_parent_id = get_rbac_default_workspace()
             group_name = validated_create_group_data.get("name")
 
-            workspace_id = post_rbac_workspace(group_name, str(default_parent_id), f"{group_name} group")
+            # Before waiting and workspace creation in RBAC validate whether the hosts can be added to the group
+            if len(host_id_list := validated_create_group_data.get("host_ids", [])) > 0:
+                validate_add_host_list_to_group_for_group_create(
+                    host_id_list,
+                    group_name,
+                    get_current_identity().org_id,
+                )
+
+            workspace_id = post_rbac_workspace(group_name, f"{group_name} group")
             if not workspace_id and not inventory_config().bypass_rbac:
                 message = f"Error while creating workspace for {group_name}"
                 logger.exception(message)
                 return json_error_response("Workspace creation failure", message, HTTPStatus.BAD_REQUEST)
 
+            # Wait for the MQ to notify us of the workspace creation
+            try:
+                wait_for_workspace_creation(workspace_id, inventory_config().rbac_timeout)
+            except TimeoutError:
+                abort(HTTPStatus.SERVICE_UNAVAILABLE, "Timed out waiting for a message from RBAC v2.")
+
+            add_hosts_to_group(
+                workspace_id,
+                host_id_list,
+                get_current_identity(),
+                current_app.event_producer,
+            )
+            created_group = get_group_by_id_from_db(workspace_id, get_current_identity().org_id)
         else:
             created_group = create_group_from_payload(validated_create_group_data, current_app.event_producer, None)
             create_group_count.inc()
@@ -159,7 +181,7 @@ def patch_group_by_id(group_id, body, rbac_filter=None):
                 put_rbac_workspace(new_group_name, new_group_description)
 
         # Separate out the host IDs because they're not stored on the Group
-        patch_group(group_to_update, validated_patch_group_data, current_app.event_producer)
+        patch_group(group_to_update, validated_patch_group_data, identity, current_app.event_producer)
 
     except InventoryException as ie:
         log_patch_group_failed(logger, group_id)

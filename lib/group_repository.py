@@ -1,6 +1,8 @@
+import time
 from typing import Optional
 from uuid import UUID
 
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from sqlalchemy import select
 
 from api.cache import delete_cached_system_keys
@@ -87,7 +89,29 @@ def _invalidate_system_cache(host_list: list[Host], identity: Identity):
             delete_cached_system_keys(insights_id=insights_id, org_id=identity.org_id, owner_id=owner_id)
 
 
-def _add_hosts_to_group(group_id: str, host_id_list: list[str], org_id: str):
+def validate_add_host_list_to_group_for_group_create(host_id_list: list[str], group_name: str, org_id: str):
+    # Check if the hosts exist in Inventory and have correct org_id
+    host_query = Host.query.filter((Host.org_id == org_id) & Host.id.in_(host_id_list)).all()
+    found_ids_set = {str(host.id) for host in host_query}
+    if found_ids_set != set(host_id_list):
+        nonexistent_hosts = set(host_id_list) - found_ids_set
+        log_host_group_add_failed(logger, host_id_list, group_name)
+        raise InventoryException(
+            title="Invalid request", detail=f"Could not find existing host(s) with ID {nonexistent_hosts}."
+        )
+
+    # Check if the hosts are already associated with another group
+    assoc_query = HostGroupAssoc.query.filter(HostGroupAssoc.host_id.in_(host_id_list)).all()
+    if assoc_query:
+        taken_hosts = [str(assoc.host_id) for assoc in assoc_query]
+        log_host_group_add_failed(logger, host_id_list, group_name)
+        raise InventoryException(
+            title="Invalid request",
+            detail=f"The following subset of hosts are already associated with another group: {taken_hosts}.",
+        )
+
+
+def validate_add_host_list_to_group(host_id_list: list[str], group_id: str, org_id: str):
     # Check if the hosts exist in Inventory and have correct org_id
     host_query = Host.query.filter((Host.org_id == org_id) & Host.id.in_(host_id_list)).all()
     found_ids_set = {str(host.id) for host in host_query}
@@ -110,7 +134,12 @@ def _add_hosts_to_group(group_id: str, host_id_list: list[str], org_id: str):
             detail=f"The following subset of hosts are already associated with another group: {taken_hosts}.",
         )
 
-    # Fitler out hosts that are already in the group
+
+def _add_hosts_to_group(group_id: str, host_id_list: list[str], org_id: str):
+    # First, validate that the hosts can even be added to the group
+    validate_add_host_list_to_group(host_id_list, group_id, org_id)
+
+    # Filter out hosts that are already in the group
     assoc_query = HostGroupAssoc.query.filter(
         HostGroupAssoc.host_id.in_(host_id_list), HostGroupAssoc.group_id == group_id
     ).all()
@@ -126,6 +155,28 @@ def _add_hosts_to_group(group_id: str, host_id_list: list[str], org_id: str):
     _update_group_update_time(group_id, org_id)
 
     log_host_group_add_succeeded(logger, host_id_list, group_id)
+
+
+def wait_for_workspace_creation(workspace_id: str, timeout: int = 5):
+    conn = db.session.connection().connection
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    cursor = conn.cursor()
+    cursor.execute("LISTEN workspace_create;")
+    timeout_start = time.time()
+    try:
+        while time.time() < timeout_start + timeout:
+            conn.poll()
+            for notify in conn.notifies:
+                if str(notify.payload) == str(workspace_id):
+                    return
+
+            conn.notifies.clear()
+            time.sleep(0.1)
+    finally:
+        cursor.execute("UNLISTEN workspace_create;")
+        cursor.close()
+
+    raise TimeoutError("No workspace creation message consumed in time.")
 
 
 def add_hosts_to_group(group_id: str, host_id_list: list[str], identity: Identity, event_producer: EventProducer):
@@ -203,9 +254,11 @@ def create_group_from_payload(group_data: dict, event_producer: EventProducer, g
     )
 
 
-def _remove_all_hosts_from_group(group: Group):
-    host_group_assocs_to_delete = HostGroupAssoc.query.filter(HostGroupAssoc.group_id == group.id).all()
-    _remove_hosts_from_group(group.id, [assoc.host_id for assoc in host_group_assocs_to_delete])
+def _remove_all_hosts_from_group(group: Group, org_id: str):
+    host_ids = [
+        row[0] for row in db.session.query(HostGroupAssoc.host_id).filter(HostGroupAssoc.group_id == group.id).all()
+    ]
+    _remove_hosts_from_group(group.id, host_ids, org_id)
 
 
 def _delete_host_group_assoc(session, assoc):
@@ -218,10 +271,10 @@ def _delete_host_group_assoc(session, assoc):
     return assoc_deleted
 
 
-def _delete_group(group: Group) -> bool:
+def _delete_group(group: Group, org_id: str) -> bool:
     # First, remove all hosts from the requested group.
     group_id = group.id
-    _remove_all_hosts_from_group(group)
+    _remove_all_hosts_from_group(group, org_id)
 
     delete_query = db.session.query(Group).filter(Group.id == group_id)
     delete_query.delete(synchronize_session="fetch")
@@ -249,7 +302,7 @@ def delete_group_list(group_id_list: list[str], identity: Identity, event_produc
             group_id = group.id
 
             with delete_group_processing_time.time():
-                if _delete_group(group):
+                if _delete_group(group, identity.org_id):
                     deletion_count += 1
                     delete_group_count.inc()
                     log_group_delete_succeeded(logger, group_id, get_control_rule())
@@ -266,7 +319,7 @@ def remove_hosts_from_group(group_id, host_id_list, identity, event_producer):
     removed_host_ids = []
     staleness = get_staleness_obj(identity.org_id)
     with session_guard(db.session):
-        removed_host_ids = _remove_hosts_from_group(group_id, host_id_list)
+        removed_host_ids = _remove_hosts_from_group(group_id, host_id_list, identity.org_id)
         if get_flag_value(FLAG_INVENTORY_KESSEL_WORKSPACE_MIGRATION):
             # Add hosts to the "ungrouped" group
             ungrouped_group = get_or_create_ungrouped_hosts_group_for_identity(identity)
@@ -278,9 +331,8 @@ def remove_hosts_from_group(group_id, host_id_list, identity, event_producer):
     return len(removed_host_ids)
 
 
-def _remove_hosts_from_group(group_id, host_id_list):
+def _remove_hosts_from_group(group_id, host_id_list, org_id):
     removed_host_ids = []
-    org_id = get_current_identity().org_id
     group_query = Group.query.filter(Group.org_id == org_id, Group.id == group_id)
 
     # First, find the group to make sure the org_id matches
@@ -311,14 +363,13 @@ def get_group_by_id_from_db(group_id: str, org_id: str) -> Group:
     return query.one_or_none()
 
 
-def patch_group(group: Group, patch_data: dict, event_producer: EventProducer):
+def patch_group(group: Group, patch_data: dict, identity: Identity, event_producer: EventProducer):
     group_id = group.id
     host_id_data = patch_data.get("host_ids")
     new_host_ids = {host_id for host_id in host_id_data} if host_id_data is not None else None
 
     existing_host_uuids = db.session.query(HostGroupAssoc.host_id).filter(HostGroupAssoc.group_id == group_id).all()
     existing_host_ids = {str(host_id[0]) for host_id in existing_host_uuids}
-    identity = get_current_identity()
     staleness = get_staleness_obj(identity.org_id)
 
     with session_guard(db.session):
@@ -327,7 +378,7 @@ def patch_group(group: Group, patch_data: dict, event_producer: EventProducer):
 
         # Update host list, if provided
         if new_host_ids is not None:
-            _remove_hosts_from_group(group_id, list(existing_host_ids - new_host_ids))
+            _remove_hosts_from_group(group_id, list(existing_host_ids - new_host_ids), identity.org_id)
             _add_hosts_to_group(group_id, list(new_host_ids - existing_host_ids), identity.org_id)
             if get_flag_value(FLAG_INVENTORY_KESSEL_WORKSPACE_MIGRATION):
                 # Add hosts to the "ungrouped" group
@@ -383,7 +434,7 @@ def get_or_create_ungrouped_hosts_group_for_identity(identity: Identity) -> Grou
         return group
 
     # Otherwise, create the workspace
-    workspace_id = rbac_create_ungrouped_hosts_workspace()
+    workspace_id = rbac_create_ungrouped_hosts_workspace(identity)
 
     # Create "ungrouped" group for this org using group ID == workspace ID
     return add_group(

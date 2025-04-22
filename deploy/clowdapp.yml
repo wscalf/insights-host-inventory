@@ -31,7 +31,7 @@ objects:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        image: quay.io/cloudservices/ubi8-nginx-124:1-38.1740654124
+        image: quay.io/cloudservices/ubi8-nginx-124:1-39.1741813445
         livenessProbe:
           failureThreshold: 5
           httpGet:
@@ -169,6 +169,8 @@ objects:
           value: ${BYPASS_UNLEASH}
         - name: UNLEASH_REFRESH_INTERVAL
           value: ${UNLEASH_REFRESH_INTERVAL}
+        - name: RBAC_V2_FORCE_ORG_ADMIN
+          value: ${RBAC_V2_FORCE_ORG_ADMIN}
         - name: SEGMENTIO_WRITE_KEY
           valueFrom:
             secretKeyRef:
@@ -479,6 +481,8 @@ objects:
           value: ${BYPASS_UNLEASH}
         - name: UNLEASH_REFRESH_INTERVAL
           value: ${UNLEASH_REFRESH_INTERVAL}
+        - name: RBAC_V2_FORCE_ORG_ADMIN
+          value: ${RBAC_V2_FORCE_ORG_ADMIN}
         - name: SEGMENTIO_WRITE_KEY
           valueFrom:
             secretKeyRef:
@@ -596,6 +600,8 @@ objects:
           value: ${MQ_DB_BATCH_MAX_MESSAGES}
         - name: MQ_DB_BATCH_MAX_SECONDS
           value: ${MQ_DB_BATCH_MAX_SECONDS}
+        - name: RBAC_V2_FORCE_ORG_ADMIN
+          value: ${RBAC_V2_FORCE_ORG_ADMIN}
         image: ${IMAGE}:${IMAGE_TAG}
         livenessProbe:
           failureThreshold: 3
@@ -695,6 +701,8 @@ objects:
           value: ${MQ_DB_BATCH_MAX_MESSAGES}
         - name: MQ_DB_BATCH_MAX_SECONDS
           value: ${MQ_DB_BATCH_MAX_SECONDS}
+        - name: RBAC_V2_FORCE_ORG_ADMIN
+          value: ${RBAC_V2_FORCE_ORG_ADMIN}
         image: ${IMAGE}:${IMAGE_TAG}
         livenessProbe:
           failureThreshold: 3
@@ -808,6 +816,98 @@ objects:
           requests:
             cpu: ${CPU_REQUEST_MQ_SP}
             memory: ${MEMORY_REQUEST_MQ_SP}
+    - name: mq-workspaces
+      replicas: ${{REPLICAS_P1}}
+      podSpec:
+        args: ["./inv_mq_service.py"]
+        env:
+        - name: CONSOLEDOT_HOSTNAME
+          value: ${CONSOLEDOT_HOSTNAME}
+        - name: INVENTORY_LOG_LEVEL
+          value: ${LOG_LEVEL}
+        - name: INVENTORY_DB_SSL_MODE
+          value: ${INVENTORY_DB_SSL_MODE}
+        - name: INVENTORY_DB_SSL_CERT
+          value: ${INVENTORY_DB_SSL_CERT}
+        - name: KAFKA_CONSUMER_TOPIC
+          value: ${KAFKA_KESSEL_WORKSPACES_TOPIC}
+        - name: KAFKA_WORKSPACES_TOPIC
+          value: ${KAFKA_KESSEL_WORKSPACES_TOPIC}
+        - name: KAFKA_EVENT_TOPIC
+          value: ${KAFKA_EVENT_TOPIC}
+        - name: KAFKA_NOTIFICATION_TOPIC
+          value: ${KAFKA_NOTIFICATION_TOPIC}
+        - name: KAFKA_SYSTEM_PROFILE_TOPIC
+          value: ${KAFKA_SYSTEM_PROFILE_TOPIC}
+        - name: KAFKA_HOST_INGRESS_GROUP
+          value: ${KAFKA_HOST_INGRESS_GROUP}
+        - name: KAFKA_PRODUCER_ACKS
+          value: ${KAFKA_PRODUCER_ACKS}
+        - name: KAFKA_PRODUCER_RETRIES
+          value: ${KAFKA_PRODUCER_RETRIES}
+        - name: KAFKA_PRODUCER_RETRY_BACKOFF_MS
+          value: ${KAFKA_PRODUCER_RETRY_BACKOFF_MS}
+        - name: KAFKA_SECURITY_PROTOCOL
+          value: ${KAFKA_SECURITY_PROTOCOL}
+        - name: KAFKA_SASL_MECHANISM
+          value: ${KAFKA_SASL_MECHANISM}
+        - name: CLOWDER_ENABLED
+          value: "true"
+        - name: INVENTORY_DB_SCHEMA
+          value: "${INVENTORY_DB_SCHEMA}"
+        - name: INVENTORY_API_CACHE_TIMEOUT_SECONDS
+          value: "${INVENTORY_API_CACHE_TIMEOUT_SECONDS}"
+        - name: INVENTORY_API_CACHE_TYPE
+          value: "${INVENTORY_API_CACHE_TYPE}"
+        - name: INVENTORY_CACHE_INSIGHTS_CLIENT_SYSTEM_TIMEOUT_SEC
+          value: "${INVENTORY_CACHE_INSIGHTS_CLIENT_SYSTEM_TIMEOUT_SEC}"
+        - name: INVENTORY_CACHE_THREAD_POOL_MAX_WORKERS
+          value: "${INVENTORY_CACHE_THREAD_POOL_MAX_WORKERS}"
+        - name: KAFKA_CONSUMER_SESSION_TIMEOUT_MS
+          value: "${KAFKA_CONSUMER_SESSION_TIMEOUT_MS}"
+        - name: KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS
+          value: "${KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS}"
+        - name: UNLEASH_URL
+          value: ${UNLEASH_URL}
+        - name: UNLEASH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ${UNLEASH_SECRET_NAME}
+              key: CLIENT_ACCESS_TOKEN
+              optional: true
+        - name: BYPASS_UNLEASH
+          value: ${BYPASS_UNLEASH}
+        - name: UNLEASH_REFRESH_INTERVAL
+          value: ${UNLEASH_REFRESH_INTERVAL}
+        - name: MQ_DB_BATCH_MAX_MESSAGES
+          value: ${MQ_DB_BATCH_MAX_MESSAGES}
+        - name: MQ_DB_BATCH_MAX_SECONDS
+          value: ${MQ_DB_BATCH_MAX_SECONDS}
+        - name: CONSUMER_MQ_BROKER
+          value: ${CONSUMER_MQ_BROKER}
+        - name: RBAC_V2_FORCE_ORG_ADMIN
+          value: ${RBAC_V2_FORCE_ORG_ADMIN}
+        image: ${IMAGE}:${IMAGE_TAG}
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+        resources:
+          limits:
+            cpu: ${CPU_LIMIT_WORKSPACES_MQ}
+            memory: ${MEMORY_LIMIT_WORKSPACES_MQ}
+          requests:
+            cpu: ${CPU_REQUEST_WORKSPACES_MQ}
+            memory: ${MEMORY_REQUEST_WORKSPACES_MQ}
     - name: export-service
       minReplicas: ${{REPLICAS_EXPORT_SVC}}
       podSpec:
@@ -1251,6 +1351,8 @@ objects:
         image: ${IMAGE}:${IMAGE_TAG}
         args: ["./jobs/create_ungrouped_host_groups.py"]
         env:
+          - name: PYTHONPATH
+            value: '/opt/app-root/src'
           - name: INVENTORY_LOG_LEVEL
             value: ${LOG_LEVEL}
           - name: INVENTORY_DB_SSL_MODE
@@ -1314,6 +1416,8 @@ objects:
         image: ${IMAGE}:${IMAGE_TAG}
         args: ["./jobs/export_group_data_s3.py"]
         env:
+          - name: PYTHONPATH
+            value: '/opt/app-root/src'
           - name: INVENTORY_LOG_LEVEL
             value: ${LOG_LEVEL}
           - name: INVENTORY_DB_SSL_MODE
@@ -1352,6 +1456,41 @@ objects:
           requests:
             cpu: ${CPU_REQUEST_GROUPS_S3_EXPORT}
             memory: ${MEMORY_REQUEST_GROUPS_S3_EXPORT}
+    - name: update-hosts-last-check-in
+      schedule: ${{HOSTS_LAST_CHECK_IN_SCHEDULE}}
+      restartPolicy: Never
+      suspend: ${{HOSTS_LAST_CHECK_IN_SUSPEND}}
+      podSpec:
+        image: ${IMAGE}:${IMAGE_TAG}
+        args: ["./jobs/update_hosts_last_check_in.py"]
+        env:
+          - name: PYTHONPATH
+            value: '/opt/app-root/src'
+          - name: HOST_UPDATE_LIMIT
+            value: ${HOST_UPDATE_LIMIT}
+          - name: INVENTORY_LOG_LEVEL
+            value: ${LOG_LEVEL}
+          - name: INVENTORY_DB_SSL_MODE
+            value: ${INVENTORY_DB_SSL_MODE}
+          - name: INVENTORY_DB_SSL_CERT
+            value: ${INVENTORY_DB_SSL_CERT}
+          - name: INVENTORY_DB_SCHEMA
+            value: "${INVENTORY_DB_SCHEMA}"
+          - name: PROMETHEUS_PUSHGATEWAY
+            value: ${PROMETHEUS_PUSHGATEWAY}
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: CLOWDER_ENABLED
+            value: "true"
+        resources:
+          limits:
+            cpu: ${CPU_LIMIT_HOSTS_LAST_CHECK_IN}
+            memory: ${MEMORY_LIMIT_HOSTS_LAST_CHECK_IN}
+          requests:
+            cpu: ${CPU_REQUEST_HOSTS_LAST_CHECK_IN}
+            memory: ${MEMORY_REQUEST_HOSTS_LAST_CHECK_IN}
     database:
       name: ${DB_NAME}
       version: 16
@@ -1370,6 +1509,8 @@ objects:
         partitions: ${{NUMBER_OF_KAFKA_HOST_INGRESS_P1_TOPIC_PARTITIONS}}
       - topicName: ${KAFKA_EXPORT_SERVICE_TOPIC}
         partitions: ${{NUMBER_OF_KAFKA_EXPORT_SERVICE_TOPIC_PARTITIONS}}
+      - topicName: ${KAFKA_KESSEL_WORKSPACES_TOPIC}
+        partitions: ${{NUMBER_OF_KAFKA_KESSEL_WORKSPACES_TOPIC_PARTITIONS}}
 # this service proxies requests for the old URL (insights-inventory:8080) to the clowderized service (host-inventory-service:8000)
 - apiVersion: v1
   kind: Service
@@ -1398,6 +1539,7 @@ objects:
     logLevel: ${FLOORIST_LOGLEVEL}
     queries:
       - prefix: insights/inventory/hosts
+        chunksize: 50000
         query: >-
           SELECT
             "id",
@@ -1432,22 +1574,23 @@ objects:
     suspend: ${{FLOORIST_SUSPEND}}
     logLevel: ${FLOORIST_LOGLEVEL}
     queries:
-      - prefix: hms_analytics/inventory/${ENV_NAME}/hosts
-        query: >-
-          SELECT
-            "id",
-            COALESCE("account", '0') AS "account",
-            "org_id" AS "org_id",
-            "created_on" AS "created_at",
-            "modified_on" AS "updated_at",
-            "reporter" AS "reporter",
-            "canonical_facts"->>'insights_id' AS "insights_id",
-            "canonical_facts"->>'subscription_manager_id' AS "subscription_manager_id",
-            "canonical_facts"->>'bios_uuid' AS "bios_uuid",
-            "canonical_facts"->>'provider_id' AS "provider_id",
-            "canonical_facts"->>'provider_type' AS "provider_type"
-          FROM "hbi"."hosts";
+#      - prefix: hms_analytics/inventory/${ENV_NAME}/hosts
+#        query: >-
+#          SELECT
+#            "id",
+#            COALESCE("account", '0') AS "account",
+#            "org_id" AS "org_id",
+#            "created_on" AS "created_at",
+#            "modified_on" AS "updated_at",
+#            "reporter" AS "reporter",
+#            "canonical_facts"->>'insights_id' AS "insights_id",
+#            "canonical_facts"->>'subscription_manager_id' AS "subscription_manager_id",
+#            "canonical_facts"->>'bios_uuid' AS "bios_uuid",
+#            "canonical_facts"->>'provider_id' AS "provider_id",
+#            "canonical_facts"->>'provider_type' AS "provider_type"
+#          FROM "hbi"."hosts";
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups
+        chunksize: 10000
         query: >-
           SELECT
             "id",
@@ -1498,6 +1641,7 @@ objects:
           WHERE "modified_on" >= NOW() - INTERVAL '1 week'
           GROUP BY "reporter";
       - prefix: hms_analytics/inventory/${ENV_NAME}/hosts_metrics/hosts_per_org_id
+        chunksize: 10000
         query: >-
           SELECT
             "org_id" AS "org_id",
@@ -1506,10 +1650,12 @@ objects:
           GROUP BY "org_id"
           ORDER BY "host_count" DESC;
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups_metrics/groups_count
+        chunksize: 10000
         query: >-
           SELECT COUNT(*) AS "group_counts"
           FROM "hbi"."groups";
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups_metrics/groups_count_by_account
+        chunksize: 10000
         query: >-
           SELECT
             DISTINCT "account" AS "account",
@@ -1518,6 +1664,7 @@ objects:
           GROUP BY "account"
           ORDER BY "count" DESC;
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups_metrics/org_ids_with_null_accouns
+        chunksize: 10000
         query: >-
           SELECT
             DISTINCT "org_id" AS "org_id",
@@ -1527,6 +1674,7 @@ objects:
           GROUP BY "org_id"
           ORDER BY count DESC;
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups_metrics/org_ids_with_group_names
+        chunksize: 10000
         query: >-
           SELECT
             DISTINCT "org_id" AS "org_id",
@@ -1535,6 +1683,7 @@ objects:
           GROUP BY "org_id", "name"
           ORDER BY "name" ASC;
       - prefix: hms_analytics/inventory/${ENV_NAME}/groups_metrics/hosts_per_groups
+        chunksize: 10000
         query: >-
           SELECT
             "id" AS "group_id",
@@ -1654,6 +1803,15 @@ parameters:
 - name: MEMORY_LIMIT_MQ_SP
   value: 512Mi
 
+- name: CPU_REQUEST_WORKSPACES_MQ
+  value: 250m
+- name: CPU_LIMIT_WORKSPACES_MQ
+  value: 500m
+- name: MEMORY_REQUEST_WORKSPACES_MQ
+  value: 256Mi
+- name: MEMORY_LIMIT_WORKSPACES_MQ
+  value: 512Mi
+
 - name: CPU_REQUEST_REAPER
   value: 250m
 - name: CPU_LIMIT_REAPER
@@ -1735,6 +1893,17 @@ parameters:
 - name: MEMORY_LIMIT_EXPORT_SVC
   value: 512Mi
 
+- name: CPU_REQUEST_HOSTS_LAST_CHECK_IN
+  value: 250m
+- name: CPU_LIMIT_HOSTS_LAST_CHECK_IN
+  value: 500m
+- name: MEMORY_REQUEST_HOSTS_LAST_CHECK_IN
+  value: 256Mi
+- name: MEMORY_LIMIT_HOSTS_LAST_CHECK_IN
+  value: 512Mi
+- name: HOST_UPDATE_LIMIT
+  value: "50000"
+
 - description: Replica count for p1 consumer
   name: REPLICAS_P1
   value: "5"
@@ -1807,6 +1976,12 @@ parameters:
 - name: NUMBER_OF_KAFKA_HOST_INGRESS_P1_TOPIC_PARTITIONS
   description: Number of partitions for the Kafka host ingress P1 topic
   value: '1'
+- name: KAFKA_KESSEL_WORKSPACES_TOPIC
+  description: The Kafka topic for Kessel Workspace data
+  value: outbox.event.workspace
+- name: NUMBER_OF_KAFKA_KESSEL_WORKSPACES_TOPIC_PARTITIONS
+  description: Number of partitions for the Kafka kessel workspaces topic
+  value: '1'
 - name: KAFKA_EVENT_TOPIC
   description: The topic for Host data that were processed by Inventory
   value: platform.inventory.events
@@ -1848,6 +2023,8 @@ parameters:
   value: PLAINTEXT
 - name: KAFKA_SASL_MECHANISM
   value: 'PLAIN'
+- name: CONSUMER_MQ_BROKER
+  value: ''
 - name: PROMETHEUS_PUSHGATEWAY
   value: 'localhost:9091'
 - name: KAFKA_BOOTSTRAP_HOST
@@ -1874,6 +2051,10 @@ parameters:
   value: 'false'
 - name: SYNDICATOR_CRON_SCHEDULE
   value: '*/5 * * * *'
+- name: HOSTS_LAST_CHECK_IN_SCHEDULE
+  value: '@hourly'
+- name: HOSTS_LAST_CHECK_IN_SUSPEND
+  value: 'false'
 - name: KAFKA_SP_VALIDATOR_MAX_MESSAGES
   value: '10000'
 - name: TENANT_TRANSLATOR_HOST
@@ -1939,6 +2120,9 @@ parameters:
 - name: S3_AWS_SECRET
   description: The AWS secret for S3
   value: 'hbi-kessel-s3'
+- name: RBAC_V2_FORCE_ORG_ADMIN
+  description: Whether to force User Identities to use is_org_admin=True for RBAC v2 calls
+  value: 'false'
 
 # NGINX
 - displayName: Minimum replicas
