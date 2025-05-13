@@ -23,6 +23,7 @@ def main():
     application = create_app(RuntimeEnvironment.SERVICE)
     config = application.app.config["INVENTORY_CONFIG"]
     init_cache(config, application)
+
     start_http_server(config.metrics_port)
 
     topic_to_hbi_consumer: dict[str, HBIMessageConsumerBase] = {
