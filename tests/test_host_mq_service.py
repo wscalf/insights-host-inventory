@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import marshmallow
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -116,27 +117,64 @@ def test_handle_message_failure_invalid_message_format(mocker, ingress_message_c
 
 
 @pytest.mark.usefixtures("flask_app")
-@pytest.mark.parametrize("identity", (SYSTEM_IDENTITY, SATELLITE_IDENTITY))
+@pytest.mark.parametrize("identity", (SYSTEM_IDENTITY, SATELLITE_IDENTITY, USER_IDENTITY))
 @pytest.mark.parametrize("kessel_migration", (True, False))
-def test_handle_message_happy_path(identity, kessel_migration, mocker, ingress_message_consumer_mock):
-    with mocker.patch("app.queue.host_mq.get_flag_value", return_value=kessel_migration):
-        expected_insights_id = generate_uuid()
-        host = minimal_host(account=identity["account_number"], insights_id=expected_insights_id)
+@pytest.mark.parametrize("existing_ungrouped", (True, False))
+def test_handle_message_happy_path(
+    identity, kessel_migration, existing_ungrouped, mocker, ingress_message_consumer_mock, db_create_group
+):
+    mocker.patch("app.queue.host_mq.get_flag_value", return_value=kessel_migration)
+    expected_insights_id = generate_uuid()
+    host = minimal_host(org_id=identity["org_id"], insights_id=expected_insights_id)
+    existing_group_name = "test group"
+    if existing_ungrouped:
+        db_create_group(existing_group_name, identity=identity, ungrouped=existing_ungrouped)
 
-        mock_notification_event_producer = mocker.Mock()
+    mock_notification_event_producer = mocker.Mock()
+    message = wrap_message(host.data(), "add_host", get_platform_metadata(identity))
+    result = ingress_message_consumer_mock.handle_message(json.dumps(message))
 
-        message = wrap_message(host.data(), "add_host", get_platform_metadata(identity))
-        result = ingress_message_consumer_mock.handle_message(json.dumps(message))
+    assert result.event_type == EventType.created
+    assert result.host_row.canonical_facts["insights_id"] == expected_insights_id
+    if kessel_migration:
+        assert len(result.host_row.groups) == 1
+        assert result.host_row.groups[0]["name"] == existing_group_name if existing_ungrouped else "Ungrouped Hosts"
+        assert result.host_row.groups[0]["ungrouped"] is True
+    else:
+        assert result.host_row.groups == []
 
-        assert result.event_type == EventType.created
-        assert result.host_row.canonical_facts["insights_id"] == expected_insights_id
-        if kessel_migration:
-            assert len(result.host_row.groups) == 1
-            assert result.host_row.groups[0]["name"] == "ungrouped"
-        else:
-            assert result.host_row.groups == []
+    mock_notification_event_producer.write_event.assert_not_called()
 
-        mock_notification_event_producer.write_event.assert_not_called()
+
+@pytest.mark.usefixtures("flask_app")
+@pytest.mark.usefixtures("enable_rbac")
+@pytest.mark.parametrize("identity", (SYSTEM_IDENTITY, SATELLITE_IDENTITY, USER_IDENTITY))
+def test_handle_message_kessel_private_endpoint(identity, mocker, ingress_message_consumer_mock):
+    mock_psk = "1234567890"
+    mocker.patch("app.queue.host_mq.get_flag_value", return_value=True)
+    get_rbac_mock = mocker.patch(
+        "lib.middleware.rbac_get_request_using_endpoint_and_headers", return_value={"id": str(generate_uuid())}
+    )
+    mocker.patch(
+        "lib.middleware.inventory_config",
+        return_value=SimpleNamespace(
+            rbac_psk=mock_psk,
+            bypass_rbac=False,
+            rbac_endpoint="fake-rbac-endpoint:8080",
+        ),
+    )
+    host = minimal_host(org_id=identity["org_id"])
+
+    message = wrap_message(host.data(), "add_host", get_platform_metadata(identity))
+    result = ingress_message_consumer_mock.handle_message(json.dumps(message))
+
+    assert result.event_type == EventType.created
+    assert "/_private/_s2s/workspaces/ungrouped/" in get_rbac_mock.call_args_list[0][0][0]
+    assert get_rbac_mock.call_args_list[0][0][1] == {
+        "X-RH-RBAC-CLIENT-ID": "inventory",
+        "X-RH-RBAC-ORG-ID": "test",
+        "X-RH-RBAC-PSK": mock_psk,
+    }
 
 
 @pytest.mark.usefixtures("flask_app")
@@ -1394,7 +1432,6 @@ def test_other_values_are_ignored(value):
     assert True
 
 
-@pytest.mark.usefixtures("api_get")
 def test_host_account_using_mq(mq_create_or_update_host, db_get_host, db_get_hosts):
     host = minimal_host(account=SYSTEM_IDENTITY["account_number"], fqdn="d44533.foo.redhat.co")
     host.account = SYSTEM_IDENTITY["account_number"]
@@ -1825,6 +1862,9 @@ def test_groups_not_overwritten_for_existing_hosts(
     assert created_event["host"]["ansible_host"] == "updated.ansible.host"
     assert created_event["host"]["groups"][0]["id"] == group_id
 
+    retrieved_host = db_get_hosts_for_group(group.id)[0]
+    assert retrieved_host.groups[0]["ungrouped"] is False
+
 
 @pytest.mark.usefixtures("event_datetime_mock", "db_get_host")
 def test_add_host_with_invalid_identity(mocker, mq_create_or_update_host):
@@ -2122,6 +2162,51 @@ def test_workspace_mq_create(workspace_message_consumer_mock, workspace_type, db
     assert found_group.ungrouped == (workspace_type == "ungrouped-hosts")
 
 
+@pytest.mark.parametrize(
+    "workspace_type",
+    (
+        "standard",
+        "ungrouped-hosts",
+    ),
+)
+@pytest.mark.parametrize("ungrouped", (True, False))
+def test_workspace_mq_create_already_exists(
+    db_create_group, workspace_message_consumer_mock, db_get_group_by_id, workspace_type, ungrouped
+):
+    original_workspace_name = "Existing Group"
+
+    # Create a group
+    workspace_id = db_create_group("Existing Group", ungrouped=ungrouped).id
+
+    # Generate a workspace message with the same ID
+    message = generate_kessel_workspace_message("create", str(workspace_id), "test-kessel-workspace", workspace_type)
+
+    workspace_message_consumer_mock.handle_message(json.dumps(message))
+    found_group = db_get_group_by_id(workspace_id)
+
+    assert found_group.name == original_workspace_name
+    assert found_group.ungrouped == ungrouped
+
+
+def test_workspace_mq_create_foreign_key_violation(monkeypatch, workspace_message_consumer_mock):
+    # Generate a workspace message that would trigger a foreign key violation
+    message = generate_kessel_workspace_message(
+        "create", "nonexistent_foreign_key", "test-kessel-workspace", "standard"
+    )
+    # Monkeypatch the consumer to raise an IntegrityError simulating a foreign key violation
+    monkeypatch.setattr(
+        workspace_message_consumer_mock,
+        "handle_message",
+        lambda _: (_ for _ in ()).throw(IntegrityError("Foreign key violation", None, None)),
+    )
+    # Verify that the IntegrityError propagates (or, optionally, that logging is used appropriately)
+    import pytest
+
+    with pytest.raises(IntegrityError) as exc_info:
+        workspace_message_consumer_mock.handle_message(json.dumps(message))
+    assert "Foreign key violation" in str(exc_info.value)
+
+
 def test_workspace_mq_update(mocker, flask_app, db_create_group_with_hosts, db_get_group_by_id):
     group = db_create_group_with_hosts("original_group_name", 3)
     workspace_id = str(group.id)
@@ -2154,3 +2239,24 @@ def test_workspace_mq_delete(workspace_message_consumer_mock, db_create_group, d
 
     workspace_message_consumer_mock.handle_message(json.dumps(message))
     assert not db_get_group_by_id(workspace_id)
+
+
+def test_workspace_mq_delete_non_empty(
+    workspace_message_consumer_mock, db_create_group_with_hosts, db_get_group_by_id, db_get_groups_for_host, mocker
+):
+    with mocker.patch("lib.group_repository.get_flag_value", return_value=True):
+        workspace_name = "kessel-deletable-workspace"
+        group = db_create_group_with_hosts(workspace_name, 3)
+        workspace_id = str(group.id)
+        host_id_list = [host.id for host in group.hosts]
+
+        message = generate_kessel_workspace_message("delete", workspace_id, workspace_name)
+        workspace_message_consumer_mock.handle_message(json.dumps(message))
+
+        # The group should no longer exist
+        assert not db_get_group_by_id(workspace_id)
+
+        # The hosts should now be in the "ungrouped" group
+        assert db_get_groups_for_host(host_id_list[0])[0].ungrouped
+        assert db_get_groups_for_host(host_id_list[1])[0].ungrouped
+        assert db_get_groups_for_host(host_id_list[2])[0].ungrouped

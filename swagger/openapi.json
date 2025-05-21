@@ -5,6 +5,10 @@
     "version": "1.0.0",
     "title": "Insights Host Inventory REST Interface"
   },
+  "externalDocs": {
+    "description": "API Product documentation for developers.",
+    "url": "https://developers.redhat.com/api-catalog/api/inventory"
+  },
   "paths": {
     "/hosts": {
       "get": {
@@ -31,6 +35,9 @@
           },
           {
             "$ref": "#/components/parameters/insightsId"
+          },
+          {
+            "$ref": "#/components/parameters/subscriptionManagerId"
           },
           {
             "$ref": "#/components/parameters/providerId"
@@ -142,6 +149,9 @@
           },
           {
             "$ref": "#/components/parameters/filter_param"
+          },
+          {
+            "$ref": "#/components/parameters/subscriptionManagerId"
           }
         ],
         "responses": {
@@ -1664,6 +1674,16 @@
         "description": "Filter by insights_id",
         "required": false
       },
+      "subscriptionManagerId": {
+        "in": "query",
+        "name": "subscription_manager_id",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "description": "Filter by subscription_manager_id",
+        "required": false
+      },
       "providerId": {
         "in": "query",
         "name": "provider_id",
@@ -2753,6 +2773,10 @@
           },
           "org_id": {
             "$ref": "#/components/schemas/OrgId"
+          },
+          "ungrouped": {
+            "description": "Whether the group is the \"ungrouped hosts\" group",
+            "type": "boolean"
           },
           "created": {
             "description": "A timestamp when the entry was created.",
