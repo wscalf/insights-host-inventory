@@ -327,11 +327,12 @@ def test_attempt_delete_group_read_only(api_delete_groups, mocker):
 
 @pytest.mark.usefixtures("event_producer")
 def test_delete_non_empty_group_workspace_enabled(api_delete_groups, db_create_group_with_hosts, mocker):
-    with mocker.patch("api.group.get_flag_value", return_value=True):
-        group = db_create_group_with_hosts("non_empty_group", 3)
+    mocker.patch("api.group.get_flag_value", return_value=True)
 
-        response_status, _ = api_delete_groups([group.id])
-        assert_response_status(response_status, expected_status=400)
+    group = db_create_group_with_hosts("non_empty_group", 3)
+
+    response_status, rd = api_delete_groups([group.id])
+    assert_response_status(response_status, expected_status=204)
 
 
 @pytest.mark.usefixtures("event_producer")
@@ -343,7 +344,9 @@ def test_delete_empty_group_workspace_enabled(api_delete_groups, db_create_group
         assert_response_status(response_status, expected_status=204)
 
 
+@pytest.mark.parametrize("num_hosts_to_remove", [1, 2, 3])
 def test_remove_hosts_from_existing_group_kessel(
+    num_hosts_to_remove,
     db_create_group,
     db_create_host,
     db_get_group_by_name,
@@ -353,51 +356,43 @@ def test_remove_hosts_from_existing_group_kessel(
     event_producer,
     mocker,
 ):
-    with mocker.patch("api.host_group.get_flag_value", return_value=True):
-        mocker.patch.object(event_producer, "write_event")
-        # Create a group and 3 hosts
-        group_id = db_create_group("test_group").id
-        host_id_list = [str(db_create_host().id) for _ in range(3)]
+    TOTAL_HOSTS_CREATED = 3
+    mocker.patch("lib.group_repository.get_flag_value", return_value=True)
+    mocker.patch.object(event_producer, "write_event")
+    # Create a group and hosts
+    group_id = db_create_group("test_group").id
+    host_id_list = [str(db_create_host().id) for _ in range(TOTAL_HOSTS_CREATED)]
 
-        # Add all 3 hosts to the group
-        for host_id in host_id_list:
-            db_create_host_group_assoc(host_id, group_id)
+    # Add the hosts to the group
+    for host_id in host_id_list:
+        db_create_host_group_assoc(host_id, group_id)
 
-        # Confirm that the association exists
-        hosts_before = db_get_hosts_for_group(group_id)
-        assert len(hosts_before) == 3
+    # Confirm that the association exists
+    hosts_before = db_get_hosts_for_group(group_id)
+    assert len(hosts_before) == TOTAL_HOSTS_CREATED
 
-        # Remove the first two hosts from the group
-        response_status, _ = api_remove_hosts_from_group(group_id, [host for host in host_id_list[0:2]])
-        assert response_status == 204
+    # Remove the first two hosts from the group
+    response_status, _ = api_remove_hosts_from_group(group_id, host_id_list[:num_hosts_to_remove])
+    assert response_status == 204
 
-        # Confirm that the group now only contains the last host
-        hosts_after = db_get_hosts_for_group(group_id)
-        assert len(hosts_after) == 1
-        assert str(hosts_after[0].id) == host_id_list[2]
+    # Confirm that the hosts have been removed from the original group
+    hosts_after = db_get_hosts_for_group(group_id)
+    assert len(hosts_after) == TOTAL_HOSTS_CREATED - num_hosts_to_remove
 
-        ungrouped_id = db_get_group_by_name("ungrouped").id
-        ungrouped_hosts = db_get_hosts_for_group(ungrouped_id)
-        assert len(ungrouped_hosts) == 2
+    # Confirm that Ungrouped Hosts now contains the removed hosts
+    ungrouped_id = db_get_group_by_name("Ungrouped Hosts").id
+    ungrouped_hosts = db_get_hosts_for_group(ungrouped_id)
+    assert len(ungrouped_hosts) == num_hosts_to_remove
 
-        assert event_producer.write_event.call_count == 4
-
-        # First make sure the events to remove a host exist
-        for call_arg in event_producer.write_event.call_args_list[0:2]:
-            event = json.loads(call_arg[0][0])
-            host = event["host"]
-            assert host["id"] in host_id_list[0:2]
-            assert len(host["groups"]) == 0
-            assert event["platform_metadata"] == {"b64_identity": to_auth_header(Identity(obj=USER_IDENTITY))}
-
-        # Second make sure the events to add hosts to the "ungrouped" group exist
-        for call_arg in event_producer.write_event.call_args_list[2:]:
-            event = json.loads(call_arg[0][0])
-            host = event["host"]
-            assert host["id"] in host_id_list[0:2]
-            assert len(host["groups"]) == 1
-            assert host["groups"][0]["name"] == "ungrouped"
-            assert event["platform_metadata"] == {"b64_identity": to_auth_header(Identity(obj=USER_IDENTITY))}
+    # Make sure the events associating hosts to "Ungrouped Hosts" exist
+    assert event_producer.write_event.call_count == num_hosts_to_remove
+    for call_arg in event_producer.write_event.call_args_list:
+        event = json.loads(call_arg[0][0])
+        host = event["host"]
+        assert host["id"] in host_id_list[:num_hosts_to_remove]
+        assert len(host["groups"]) == 1
+        assert host["groups"][0]["name"] == "Ungrouped Hosts"
+        assert event["platform_metadata"] == {"b64_identity": to_auth_header(Identity(obj=USER_IDENTITY))}
 
 
 @pytest.mark.usefixtures("enable_rbac")
@@ -420,15 +415,57 @@ def test_delete_hosts_from_diff_groups_post_kessel_migration(
     group2 = db_create_group_with_hosts("test_group2", 3)
     group3 = db_create_group_with_hosts("test_group3", 3)
 
-    ungrouped_group_id = str(db_create_group("ungrouped_group", ungrouped=True).id)
+    ungrouped_group_id = str(db_create_group("ungrouped", ungrouped=True).id)
 
-    with mocker.patch("lib.host_repository.get_flag_value", return_value=True):
-        hosts_to_delete = [str(group1.hosts[0].id), str(group2.hosts[0].id), str(group3.hosts[0].id)]
-        response_status, _ = api_remove_hosts_from_diff_groups(hosts_to_delete)
+    mocker.patch("lib.host_repository.get_flag_value", return_value=True)
 
-        assert_response_status(response_status, 204)
-        assert event_producer.write_event.call_count == 3
+    hosts_to_delete = [str(group1.hosts[0].id), str(group2.hosts[0].id), str(group3.hosts[0].id)]
+    response_status, _ = api_remove_hosts_from_diff_groups(hosts_to_delete)
 
-        # Check that the removed hosts were assigned to the ungrouped group
-        for host in db_get_hosts_for_group(ungrouped_group_id):
-            assert str(host.id) in hosts_to_delete
+    assert_response_status(response_status, 204)
+    assert event_producer.write_event.call_count == 3
+
+    # Check that the removed hosts were assigned to the ungrouped group
+    for host in db_get_hosts_for_group(ungrouped_group_id):
+        assert str(host.id) in hosts_to_delete
+
+
+@pytest.mark.usefixtures("enable_rbac")
+def test_delete_ungrouped_group_post_kessel_migration(
+    mocker,
+    api_delete_groups,
+    db_create_group,
+    event_producer,
+    db_get_group_by_id,
+):
+    mocker.patch.object(event_producer, "write_event")
+    get_rbac_permissions_mock = mocker.patch("lib.middleware.get_rbac_permissions")
+    mock_rbac_response = create_mock_rbac_response(
+        "tests/helpers/rbac-mock-data/inv-groups-write-resource-defs-template.json"
+    )
+    get_rbac_permissions_mock.return_value = mock_rbac_response
+
+    group = db_create_group("ungrouped", ungrouped=True)
+    group_id = str(group.id)
+    group_name = group.name
+
+    mocker.patch("api.group.get_flag_value", return_value=True)
+    response_status, _ = api_delete_groups([group_id])
+
+    # No group should be deleted
+    assert_response_status(response_status, 400)
+
+    # Confirm that ungrouped group was not deleted
+    retrieved_group = db_get_group_by_id(group_id)
+
+    assert retrieved_group.name == group_name
+    assert retrieved_group.ungrouped is True
+
+
+@pytest.mark.usefixtures("event_producer")
+def test_delete_multiple_groups(db_create_group, db_create_group_with_hosts, api_delete_groups, mocker):
+    non_empty_group = db_create_group_with_hosts("non_empty_group", 3)
+    empty_group = db_create_group("empty_group")
+    with mocker.patch("api.group.get_flag_value", return_value=True):
+        response_status, _ = api_delete_groups([non_empty_group.id, empty_group.id])
+        assert_response_status(response_status, expected_status=204)

@@ -184,19 +184,21 @@ def test_only_order_how(mq_create_three_specific_hosts, api_get, subtests):
             assert response_status == 400
 
 
-def test_invalid_fields(mq_create_three_specific_hosts, api_get, subtests):
-    created_hosts = mq_create_three_specific_hosts
+@pytest.mark.parametrize("feature_flag", (True, False))
+def test_invalid_fields(mq_create_three_specific_hosts, api_get, subtests, feature_flag):
+    with patch("api.host_query_db.get_flag_value", return_value=feature_flag):
+        created_hosts = mq_create_three_specific_hosts
 
-    urls = (
-        HOST_URL,
-        build_hosts_url(host_list_or_id=created_hosts),
-        build_system_profile_url(host_list_or_id=created_hosts),
-    )
-    for url in urls:
-        with subtests.test(url=url):
-            fields_query_parameters = build_fields_query_parameters(fields="i_love_ketchup")
-            response_status, _ = api_get(url, query_parameters=fields_query_parameters)
-            assert response_status == 400
+        urls = (
+            HOST_URL,
+            build_hosts_url(host_list_or_id=created_hosts),
+            build_system_profile_url(host_list_or_id=created_hosts),
+        )
+        for url in urls:
+            with subtests.test(url=url):
+                fields_query_parameters = build_fields_query_parameters(fields="i_love_ketchup")
+                response_status, _ = api_get(url, query_parameters=fields_query_parameters)
+                assert response_status == 400
 
 
 @pytest.mark.parametrize(
@@ -482,6 +484,17 @@ def test_query_using_insights_id(mq_create_three_specific_hosts, api_get, subtes
     assert len(response_data["results"]) == 1
 
 
+def test_query_using_subscription_manager_id(mq_create_three_specific_hosts, api_get, subtests):
+    created_hosts = mq_create_three_specific_hosts
+    url = build_hosts_url(query=f"?subscription_manager_id={created_hosts[0].subscription_manager_id}")
+
+    response_status, response_data = api_get(url)
+    api_pagination_test(api_get, subtests, url, expected_total=1)
+
+    assert response_status == 200
+    assert len(response_data["results"]) == 1
+
+
 def test_get_host_by_tag(mq_create_three_specific_hosts, api_get, subtests):
     created_hosts = mq_create_three_specific_hosts
     expected_response_list = [created_hosts[0]]
@@ -728,6 +741,9 @@ def test_query_using_group_name(db_create_group_with_hosts, api_get, num_groups)
 
     assert response_status == 200
     assert len(response_data["results"]) == num_groups * hosts_per_group
+    for result in response_data["results"]:
+        assert "existing_group_" in result["groups"][0]["name"]
+        assert result["groups"][0]["ungrouped"] is False
 
 
 def test_query_ungrouped_hosts(db_create_group_with_hosts, mq_create_three_specific_hosts, api_get):
@@ -742,6 +758,20 @@ def test_query_ungrouped_hosts(db_create_group_with_hosts, mq_create_three_speci
 
     assert response_status == 200
     assert_host_lists_equal(build_expected_host_list(ungrouped_hosts), response_data["results"])
+
+
+@pytest.mark.parametrize("ungrouped", (True, False))
+def test_query_hosts_with_group_data_kessel(ungrouped, db_create_group_with_hosts, api_get):
+    # Create a host in the "ungrouped" group
+    ungrouped_group_id = db_create_group_with_hosts("test_group", 1, ungrouped).id
+    url = build_hosts_url(query="?group_name=test_group")
+
+    response_status, response_data = api_get(url)
+
+    assert response_status == 200
+    assert (group_result := response_data["results"][0]["groups"][0])["name"] == "test_group"
+    assert group_result["id"] == str(ungrouped_group_id)
+    assert group_result["ungrouped"] is ungrouped
 
 
 def test_query_hosts_filter_updated_start_end(mq_create_or_update_host, api_get):
@@ -824,6 +854,48 @@ def test_get_hosts_order_by_group_name(db_create_group_with_hosts, db_create_mul
                 response_data["results"][group_index * hosts_per_group + host_index]["groups"][0]["name"]
                 == names[group_index]
             )
+
+
+@pytest.mark.usefixtures("enable_rbac")
+@pytest.mark.parametrize("order_how", ("ASC", "DESC"))
+def test_get_hosts_order_by_group_name_post_kessel(mocker, db_create_group_with_hosts, api_get, order_how):
+    hosts_per_group = 3
+    num_ungrouped_hosts = 5
+    names = ["ABC Group", "BCD Group", "CDE Group", "DEF Group"]
+    num_grouped_hosts = hosts_per_group * len(names)
+
+    # Shuffle the list so the groups aren't created in alphabetical order
+    # Just to make sure it's actually ordering by name and not date
+    shuffled_group_names = names.copy()
+    random.shuffle(shuffled_group_names)
+    [db_create_group_with_hosts(group_name, hosts_per_group) for group_name in shuffled_group_names]
+
+    mocker.patch("api.host_query_db.get_flag_value", return_value=True)
+
+    get_rbac_permissions_mock = mocker.patch("lib.middleware.get_rbac_permissions")
+    mock_rbac_response = create_mock_rbac_response(
+        "tests/helpers/rbac-mock-data/inv-hosts-read-resource-defs-template.json"
+    )
+    get_rbac_permissions_mock.return_value = mock_rbac_response
+
+    # Create some ungrouped hosts
+    db_create_group_with_hosts("ungrouped", num_ungrouped_hosts, True)
+
+    url = build_hosts_url(query=f"?order_by=group_name&order_how={order_how}")
+
+    response_status, response_data = api_get(url)
+
+    assert response_status == 200
+    assert num_grouped_hosts + num_ungrouped_hosts == len(response_data["results"])
+
+    if order_how == "DESC":
+        num_grouped_hosts = hosts_per_group * len(names)
+        for group_index in range(num_grouped_hosts, num_grouped_hosts + num_ungrouped_hosts):
+            assert response_data["results"][group_index]["groups"][0]["name"] == "ungrouped"
+    else:
+        # Ungrouped hosts whould be at the top of the list
+        for group_index in range(0, num_ungrouped_hosts):
+            assert response_data["results"][group_index]["groups"][0]["name"] == "ungrouped"
 
 
 @pytest.mark.parametrize("order_how", ("ASC", "DESC"))
@@ -2101,3 +2173,36 @@ def test_get_host_from_different_org(mocker, api_get):
     url = build_hosts_url()
     response_status, _ = api_get(url)
     assert_response_status(response_status, 403)
+
+
+def test_query_by_staleness_using_columns(db_create_multiple_hosts, api_get, subtests):
+    patch("app.staleness_serialization.get_flag_value", return_value=True)
+    patch("app.models.get_flag_value", return_value=True)
+    patch("app.serialization.get_flag_value", return_value=True)
+    patch("api.host_query_db.get_flag_value", return_value=True)
+
+    expected_staleness_results_map = {
+        "fresh": 3,
+        "stale": 4,
+        "stale_warning": 2,
+    }
+    staleness_timestamp_map = {
+        "fresh": now(),
+        "stale": now() - timedelta(days=3),
+        "stale_warning": now() - timedelta(days=10),
+    }
+    staleness_to_host_ids_map = dict()
+
+    # Create the hosts in each state
+    for staleness, num_hosts in expected_staleness_results_map.items():
+        # Patch the "now" function so the hosts are created in the desired state
+        with patch("app.models.datetime", **{"now.return_value": staleness_timestamp_map[staleness]}):
+            staleness_to_host_ids_map[staleness] = [str(h.id) for h in db_create_multiple_hosts(how_many=num_hosts)]
+
+    for staleness, count in expected_staleness_results_map.items():
+        with subtests.test():
+            url = build_hosts_url(query=f"?staleness={staleness}")
+            # Validate the basics, i.e. response code and results size
+            response_status, response_data = api_get(url)
+            assert response_status == 200
+            assert count == len(response_data["results"])

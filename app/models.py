@@ -4,6 +4,7 @@ from collections import namedtuple
 from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from enum import Enum
 from os.path import join
@@ -128,9 +129,7 @@ def _time_now():
 def _create_staleness_timestamps_values(host, org_id):
     staleness = _get_staleness_obj(org_id)
     staleness_ts = Timestamps.from_config(inventory_config())
-    st = get_staleness_timestamps(host, staleness_ts, staleness)
-
-    return st
+    return get_staleness_timestamps(host, staleness_ts, staleness)
 
 
 class SystemProfileNormalizer:
@@ -321,6 +320,8 @@ class LimitedHost(db.Model):  # type: ignore [name-defined]
 
 class Host(LimitedHost):
     stale_timestamp = db.Column(db.DateTime(timezone=True))
+    deletion_timestamp = db.Column(db.DateTime(timezone=True))
+    stale_warning_timestamp = db.Column(db.DateTime(timezone=True))
     reporter = db.Column(db.String(255))
     per_reporter_staleness = db.Column(JSONB)
 
@@ -350,7 +351,7 @@ class Host(LimitedHost):
         if not canonical_facts:
             raise ValidationException("At least one of the canonical fact fields must be present.")
 
-        if current_app.config["USE_SUBMAN_ID"] and canonical_facts and "subscription_manager_id" in canonical_facts:
+        if current_app.config["USE_SUBMAN_ID"] and "subscription_manager_id" in canonical_facts:
             id = canonical_facts["subscription_manager_id"]
 
         if not stale_timestamp or not reporter:
@@ -376,6 +377,8 @@ class Host(LimitedHost):
         self._update_last_check_in_date()
         # without reporter and stale_timestamp host payload is invalid.
         self._update_stale_timestamp(stale_timestamp, reporter)
+
+        self._update_staleness_timestamps()
 
         self.per_reporter_staleness = per_reporter_staleness or {}
         if not per_reporter_staleness:
@@ -405,6 +408,7 @@ class Host(LimitedHost):
         self._update_stale_timestamp(input_host.stale_timestamp, input_host.reporter)
         self._update_last_check_in_date()
         self._update_per_reporter_staleness(input_host.reporter)
+        self._update_staleness_timestamps()
 
     def patch(self, patch_data):
         logger.debug("patching host (id=%s) with data: %s", self.id, patch_data)
@@ -589,6 +593,17 @@ class Host(LimitedHost):
             self.system_profile_facts = {**self.system_profile_facts, **input_system_profile}
         orm.attributes.flag_modified(self, "system_profile_facts")
 
+    def _update_staleness_timestamps(self):
+        if get_flag_value(FLAG_INVENTORY_CREATE_LAST_CHECK_IN_UPDATE_PER_REPORTER_STALENESS):
+            staleness_timestamps = _create_staleness_timestamps_values(self, self.org_id)
+            self.stale_timestamp = staleness_timestamps["stale_timestamp"]
+            self.stale_warning_timestamp = staleness_timestamps["stale_warning_timestamp"]
+            self.deletion_timestamp = staleness_timestamps["culled_timestamp"]
+
+            orm.attributes.flag_modified(self, "stale_timestamp")
+            orm.attributes.flag_modified(self, "stale_warning_timestamp")
+            orm.attributes.flag_modified(self, "deletion_timestamp")
+
     def reporter_stale(self, reporter):
         prs = self.per_reporter_staleness.get(reporter, None)
         if not prs:
@@ -653,6 +668,8 @@ class Group(db.Model):  # type: ignore [name-defined]
 
     def patch(self, patch_data):
         logger.debug("patching group (id=%s) with data: %s", self.id, patch_data)
+        if self.ungrouped is True:
+            raise InventoryException(title="Bad Request", detail="The 'ungrouped' group can not be modified.")
         if not patch_data:
             raise InventoryException(title="Bad Request", detail="Patch json document cannot be empty.")
 
@@ -759,7 +776,9 @@ class HostInventoryMetadata(db.Model):  # type: ignore [name-defined]
 
     name = db.Column(db.String(32), primary_key=True)
     type = db.Column(db.String(32), primary_key=True)
-    last_succeeded = db.Column(db.DateTime(timezone=True), default=_time_now, onupdate=_time_now)
+    last_succeeded = db.Column(
+        db.DateTime(timezone=True), default=_time_now() - timedelta(hours=1), onupdate=_time_now
+    )
 
 
 class DiskDeviceSchema(MarshmallowSchema):
@@ -924,7 +943,7 @@ class LimitedHostSchema(CanonicalFactsSchema):
             self.system_profile_normalizer = SystemProfileNormalizer(system_profile_schema=system_profile_schema)
 
     @validates("tags")
-    def validate_tags(self, tags):
+    def validate_tags(self, tags, data_key):  # noqa: ARG002, required for marshmallow validator functions
         if isinstance(tags, list):
             return self._validate_tags_list(tags)
         elif isinstance(tags, dict):
@@ -995,7 +1014,7 @@ class LimitedHostSchema(CanonicalFactsSchema):
         return self._normalize_system_profile(self.system_profile_normalizer.filter_keys, data)
 
     @validates("system_profile")
-    def system_profile_is_valid(self, system_profile):
+    def system_profile_is_valid(self, system_profile, data_key):  # noqa: ARG002, required for marshmallow validator functions
         try:
             jsonschema_validate(
                 system_profile, self.system_profile_normalizer.schema, format_checker=Draft4Validator.FORMAT_CHECKER
@@ -1012,7 +1031,7 @@ class HostSchema(LimitedHostSchema):
     class Meta:
         unknown = EXCLUDE
 
-    stale_timestamp = fields.DateTime(required=True, timezone=True)
+    stale_timestamp = fields.AwareDateTime(required=True)
     reporter = fields.Str(required=True, validate=marshmallow_validate.Length(min=1, max=255))
 
     @staticmethod
@@ -1033,11 +1052,6 @@ class HostSchema(LimitedHostSchema):
             data["reporter"],
             data.get("groups", []),
         )
-
-    @validates("stale_timestamp")
-    def has_timezone_info(self, timestamp):
-        if timestamp.tzinfo is None:
-            raise MarshmallowValidationError("Timestamp must contain timezone info")
 
 
 class PatchHostSchema(MarshmallowSchema):

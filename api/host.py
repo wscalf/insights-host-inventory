@@ -75,6 +75,7 @@ def get_host_list(
     fqdn=None,
     hostname_or_id=None,
     insights_id=None,
+    subscription_manager_id=None,
     provider_id=None,
     provider_type=None,
     updated_start=None,
@@ -139,6 +140,7 @@ def get_host_list(
             fqdn,
             hostname_or_id,
             insights_id,
+            subscription_manager_id,
             provider_id,
             provider_type,
             updated_start,
@@ -179,6 +181,7 @@ def delete_hosts_by_filter(
     fqdn=None,
     hostname_or_id=None,
     insights_id=None,
+    subscription_manager_id=None,
     provider_id=None,
     provider_type=None,
     updated_start=None,
@@ -196,6 +199,7 @@ def delete_hosts_by_filter(
             fqdn,
             hostname_or_id,
             insights_id,
+            subscription_manager_id,
             provider_id,
             provider_type,
             updated_start,
@@ -216,6 +220,7 @@ def delete_hosts_by_filter(
             fqdn,
             hostname_or_id,
             insights_id,
+            subscription_manager_id,
             provider_id,
             provider_type,
             updated_start,
@@ -518,7 +523,11 @@ def host_checkin(body, rbac_filter=None):  # noqa: ARG001, required for all API 
     existing_host = find_existing_host(current_identity, canonical_facts)
     staleness = get_staleness_obj(current_identity.org_id)
     if existing_host:
-        existing_host._update_modified_date()
+        if get_flag_value(FLAG_INVENTORY_USE_CACHED_INSIGHTS_CLIENT_SYSTEM):
+            existing_host._update_last_check_in_date()
+            existing_host._update_staleness_timestamps()
+        else:
+            existing_host._update_modified_date()
         db.session.commit()
         serialized_host = serialize_host(existing_host, staleness_timestamps(), staleness=staleness)
         _emit_patch_event(serialized_host, existing_host)

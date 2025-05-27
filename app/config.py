@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import timedelta
@@ -12,7 +13,7 @@ from app.logging import get_logger
 PRODUCER_ACKS = {"0": 0, "1": 1, "all": "all"}
 
 HOST_TYPES = ["edge", None]
-ALL_STALENESS_STATES = ("fresh", "stale", "stale_warning")
+ALL_STALENESS_STATES = ["fresh", "stale", "stale_warning"]
 
 
 class Config:
@@ -329,11 +330,32 @@ class Config:
         self.mq_db_batch_max_messages = int(os.getenv("MQ_DB_BATCH_MAX_MESSAGES", "1"))
         self.mq_db_batch_max_seconds = float(os.getenv("MQ_DB_BATCH_MAX_SECONDS", "0.5"))
 
+        self.kessel_target_url = os.getenv("KESSEL_TARGET_URL", "localhost:9000")
+
         self.s3_access_key_id = os.getenv("S3_AWS_ACCESS_KEY_ID")
         self.s3_secret_access_key = os.getenv("S3_AWS_SECRET_ACCESS_KEY")
         self.s3_bucket = os.getenv("S3_AWS_BUCKET")
 
         self.sp_fields_to_log = os.getenv("SP_FIELDS_TO_LOG", "").split(",")
+
+        try:
+            self.api_bulk_tag_count_allowed = int(os.getenv("API_BULK_TAG_COUNT_ALLOWED", 10))
+        except ValueError:
+            self.api_bulk_tag_count_allowed = 10
+        try:
+            self.api_bulk_tag_host_batch_size = int(os.getenv("API_BULK_TAG_HOST_BATCH_SIZE", 100))
+        except ValueError:
+            self.api_bulk_tag_host_batch_size = 100
+
+        # Load the RBAC PSKs into a dict, and then store the HBI one.
+        # The structure looks like this:
+        # {"inventory": {"secret": "psk-goes-here"}}
+        try:
+            _psk_dict = json.loads(os.environ.get("RBAC_PSKS", "{}"))
+            self.rbac_psk = _psk_dict.get("inventory", {}).get("secret")
+        except json.JSONDecodeError:
+            self.logger.error("Failed to load RBAC PSKs from environment variable RBAC_PSKS")
+            self.rbac_psk = None
 
         if self._runtime_environment == RuntimeEnvironment.PENDO_JOB:
             self.pendo_sync_active = os.environ.get("PENDO_SYNC_ACTIVE", "false").lower() == "true"
